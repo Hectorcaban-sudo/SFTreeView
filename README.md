@@ -19,15 +19,49 @@ force-app/main/default/lwc/sharePointTreeList/
   sharePointTreeList.js-meta.xml          Component exposure config
 ```
 
+## How the tree is actually built (important)
+
+The SharePoint library itself has **no real folders** — every record the
+REST API returns is a flat file. The tree you see is entirely virtual,
+built like this in `SharePointTreeListController.cls`:
+
+1. **`FOLDER_LIST`** is a hardcoded map of the fixed master folder set
+   (taken from `Contracts_Folders.csv`: Base Contract, Closeout, CPARs,
+   Modifications, Custom Folder, TBD, etc.). These always render as root
+   rows, even at 0 files.
+2. Each file record has a `Contracts_x0020_Subfolder` field; its `.Value`
+   is matched (case-insensitively) against `FOLDER_LIST` to decide which
+   root folder the file belongs under. Anything that doesn't match lands
+   in a synthetic **Unmatched** bucket rather than being dropped.
+3. **Special case — "Custom Folder"**: when a file's subfolder is
+   literally "Custom Folder", a second field (assumed internal name
+   `Custom_x0020_Folder` — **change `CUSTOM_FOLDER_FIELD` at the top of
+   the class if yours differs**) supplies a free-text value. Distinct
+   values become child folders nested under "Custom Folder", and the
+   file files under that child instead of directly under the root.
+4. Every folder (root or custom child) gets a **file count**, shown in
+   the LWC as `FolderName (N)` — counts roll up, so "Custom Folder"
+   itself shows the total across all its custom children.
+
+If your API's field names differ from the sample payload (`ID`,
+`{FilenameWithExtension}`, `{Link}`, `Modified`, `Editor.DisplayName`,
+`Contracts_x0020_Subfolder.Value`, `Custom_x0020_Folder.Value`), adjust
+`parseFileRecord()` — it's the single place that maps raw JSON to the
+internal `FileRecord` shape. There's no file-size field in the sample
+payload, so size shows blank unless you tell `parseFileRecord()` where
+to find it in your actual response.
+
 ## Sample data mode (works out of the box)
 
 `SharePointTreeListController.cls` has a `USE_SAMPLE_DATA = true` flag at
-the top. While `true`, `getTreeListData()` returns a hardcoded sample
-folder/file hierarchy (Contracts, Marketing, HR, etc.) instead of calling
-your REST API, and `uploadFile()` just simulates a successful upload
-without persisting anything. This means you can deploy the component and
-see it fully working — tree, paging, filters, upload UX — before your
-integration is wired up.
+the top. While `true`, `getTreeListData()` runs a small hardcoded list of
+sample file records (spanning several of the real folder names, plus two
+different "Custom Folder" sub-values and one intentionally-unmatched
+record) through the exact same tree-building logic real data would go
+through, instead of calling your REST API. `uploadFile()` just simulates
+a successful upload without persisting anything. This means you can
+deploy the component and see it fully working — tree, folder counts,
+paging, filters, upload UX — before your integration is wired up.
 
 **Flip `USE_SAMPLE_DATA` to `false`** once your Named Credential and REST
 API are ready, so the class starts making real callouts.

@@ -181,9 +181,14 @@ export default class SharePointTreeList extends LightningElement {
         const childList = this.childrenByParent.get(item.id) || [];
         const hasKids = childList.length > 0;
 
+        const displayName =
+            item.isFolder && item.fileCount !== undefined && item.fileCount !== null
+                ? `${item.name} (${item.fileCount})`
+                : item.name;
+
         out.push({
             id: item.id,
-            name: item.name,
+            name: displayName,
             isFolder: item.isFolder,
             typeLabel: item.isFolder ? 'Folder' : 'File',
             size: item.isFolder ? '' : this.formatSize(item.size),
