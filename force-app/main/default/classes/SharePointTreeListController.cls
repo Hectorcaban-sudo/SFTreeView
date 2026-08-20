@@ -40,6 +40,17 @@
  *    shows the sum of all its children). The LWC renders this as
  *    "FolderName (N)".
  *
+ * PROJECT NUMBER / TASK ORDER NUMBER
+ * ------------------------------------------------------------
+ * The LWC reads a Project Number and Task Order Number off the CURRENT
+ * SALESFORCE RECORD (via lightning/uiRecordApi's getRecord, using field
+ * API names configurable per-page in the Lightning App Builder) and
+ * passes both values into getTreeListData() / uploadFile() below, which
+ * forward them to the external REST API as query string params
+ * (?projectNumber=...&taskOrderNumber=...). Adjust getLiveFileRecords()
+ * if your API expects them somewhere else (body, headers, different
+ * param names).
+ *
  * SETUP
  * ------------------------------------------------------------
  * 1. Create a Named Credential called "SharePoint_API" pointing at your
@@ -132,14 +143,24 @@ public with sharing class SharePointTreeListController {
     }
 
     @AuraEnabled
-    public static TreeListResult getTreeListData() {
-        List<FileRecord> files = USE_SAMPLE_DATA ? getSampleFileRecords() : getLiveFileRecords();
+    public static TreeListResult getTreeListData(String projectNumber, String taskOrderNumber) {
+        List<FileRecord> files = USE_SAMPLE_DATA
+            ? getSampleFileRecords()
+            : getLiveFileRecords(projectNumber, taskOrderNumber);
         return buildTree(files);
     }
 
-    private static List<FileRecord> getLiveFileRecords() {
+    private static List<FileRecord> getLiveFileRecords(String projectNumber, String taskOrderNumber) {
+        // Sent as query string params. If your REST API instead expects
+        // these in the request body, headers, or under different param
+        // names, adjust here - this is the only place the two values are
+        // attached to the outbound GET request.
+        String endpoint = GET_ENDPOINT
+            + '?projectNumber=' + EncodingUtil.urlEncode(String.isBlank(projectNumber) ? '' : projectNumber, 'UTF-8')
+            + '&taskOrderNumber=' + EncodingUtil.urlEncode(String.isBlank(taskOrderNumber) ? '' : taskOrderNumber, 'UTF-8');
+
         HttpRequest req = new HttpRequest();
-        req.setEndpoint(GET_ENDPOINT);
+        req.setEndpoint(endpoint);
         req.setMethod('GET');
         req.setHeader('Accept', 'application/json');
         req.setTimeout(120000);
@@ -327,7 +348,8 @@ public with sharing class SharePointTreeListController {
     }
 
     @AuraEnabled
-    public static String uploadFile(String base64Data, String fileName, String targetFolderId) {
+    public static String uploadFile(String base64Data, String fileName, String targetFolderId,
+                                     String projectNumber, String taskOrderNumber) {
         if (String.isBlank(base64Data) || String.isBlank(fileName)) {
             throw new SharePointException('File name and content are required.');
         }
@@ -339,9 +361,11 @@ public with sharing class SharePointTreeListController {
         }
 
         Map<String, Object> body = new Map<String, Object>{
-            'fileName'   => fileName,
-            'folderId'   => targetFolderId, // null/blank => upload to library root
-            'contentB64' => base64Data
+            'fileName'        => fileName,
+            'folderId'        => targetFolderId, // null/blank => upload to library root
+            'contentB64'      => base64Data,
+            'projectNumber'   => projectNumber,
+            'taskOrderNumber' => taskOrderNumber
         };
 
         HttpRequest req = new HttpRequest();

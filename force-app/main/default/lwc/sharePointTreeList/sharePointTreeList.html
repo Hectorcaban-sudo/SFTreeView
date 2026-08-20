@@ -5,6 +5,9 @@
         <div class="slds-grid slds-grid_align-spread slds-p-bottom_small toolbar">
             <div class="slds-col">
                 <h2 class="slds-text-heading_medium">SharePoint Library</h2>
+                <template if:true={recordContextLabel}>
+                    <p class="slds-text-body_small slds-text-color_weak">{recordContextLabel}</p>
+                </template>
             </div>
             <div class="slds-col slds-grid slds-grid_vertical-align-center upload-controls">
                 <lightning-combobox
@@ -38,6 +41,13 @@
                 ></lightning-button-icon>
             </div>
         </div>
+
+        <template if:true={recordFieldsError}>
+            <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                <span class="slds-assistive-text">Error</span>
+                <h2>{recordFieldsError}</h2>
+            </div>
+        </template>
 
         <template if:true={isUploading}>
             <div class="slds-p-bottom_x-small">

@@ -1,11 +1,28 @@
-import { LightningElement, track } from 'lwc';
+import { LightningElement, track, api, wire } from 'lwc';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
+import { getRecord, getFieldValue } from 'lightning/uiRecordApi';
 import getTreeListData from '@salesforce/apex/SharePointTreeListController.getTreeListData';
 import uploadFile from '@salesforce/apex/SharePointTreeListController.uploadFile';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
 export default class SharePointTreeList extends LightningElement {
+    // ---- record context (auto-populated when placed on a Record Page) ----
+    @api recordId;
+    @api objectApiName;
+
+    // ---- configurable in App Builder: field API names on the current
+    // record that hold the project number / task order number. Change
+    // the defaults below to match your object, or set them per-page in
+    // the Lightning App Builder property panel. ----
+    @api projectNumberFieldName = 'Project_Number__c';
+    @api taskOrderNumberFieldName = 'Task_Order_Number__c';
+
+    // resolved values, sent to Apex on every call
+    projectNumber;
+    taskOrderNumber;
+    recordFieldsError;
+
     // ---- raw data ----
     allItems = [];                 // flat list from Apex
     childrenByParent = new Map();  // parentId ('' for root) -> [items]
@@ -34,8 +51,52 @@ export default class SharePointTreeList extends LightningElement {
     selectedFolderId = '';         // '' = root of library
     folderOptions = [{ label: '(Library Root)', value: '' }];
 
+    // Builds the qualified field references getRecord needs, e.g.
+    // "Opportunity.Project_Number__c". Empty until objectApiName is known
+    // (it's auto-injected by the platform when on a Record Page).
+    get qualifiedRecordFields() {
+        if (!this.objectApiName || !this.recordId) {
+            return [];
+        }
+        return [
+            `${this.objectApiName}.${this.projectNumberFieldName}`,
+            `${this.objectApiName}.${this.taskOrderNumberFieldName}`
+        ];
+    }
+
+    @wire(getRecord, { recordId: '$recordId', fields: '$qualifiedRecordFields' })
+    wiredRecord({ data, error }) {
+        if (data) {
+            this.projectNumber = getFieldValue(data, `${this.objectApiName}.${this.projectNumberFieldName}`);
+            this.taskOrderNumber = getFieldValue(data, `${this.objectApiName}.${this.taskOrderNumberFieldName}`);
+            this.recordFieldsError = undefined;
+            this.loadData();
+        } else if (error) {
+            this.recordFieldsError =
+                `Could not read "${this.projectNumberFieldName}" / "${this.taskOrderNumberFieldName}" from this record. ` +
+                `Check the field API names configured for this component. (${this.extractError(error)})`;
+            this.isLoading = false;
+        }
+    }
+
     connectedCallback() {
-        this.loadData();
+        // If there's no record context (component placed on a Home/App
+        // page rather than a Record Page), qualifiedRecordFields will be
+        // empty and the wire above never fires - so load without project/
+        // task order values in that case.
+        if (!this.recordId) {
+            this.loadData();
+        }
+    }
+
+    get recordContextLabel() {
+        if (!this.recordId) {
+            return '';
+        }
+        const parts = [];
+        if (this.projectNumber) parts.push(`Project #: ${this.projectNumber}`);
+        if (this.taskOrderNumber) parts.push(`Task Order #: ${this.taskOrderNumber}`);
+        return parts.join('   |   ');
     }
 
     // ------------------------------------------------------------------
@@ -45,7 +106,10 @@ export default class SharePointTreeList extends LightningElement {
         this.isLoading = true;
         this.errorMessage = undefined;
 
-        getTreeListData()
+        getTreeListData({
+            projectNumber: this.projectNumber,
+            taskOrderNumber: this.taskOrderNumber
+        })
             .then((result) => {
                 this.allItems = result.items || [];
                 this.buildIndexes();
@@ -344,7 +408,9 @@ export default class SharePointTreeList extends LightningElement {
             uploadFile({
                 base64Data: base64,
                 fileName: file.name,
-                targetFolderId: this.selectedFolderId
+                targetFolderId: this.selectedFolderId,
+                projectNumber: this.projectNumber,
+                taskOrderNumber: this.taskOrderNumber
             })
                 .then(() => {
                     this.dispatchEvent(

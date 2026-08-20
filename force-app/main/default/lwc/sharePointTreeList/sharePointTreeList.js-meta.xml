@@ -9,4 +9,16 @@
         <target>lightning__HomePage</target>
         <target>lightning__Tab</target>
     </targets>
+    <targetConfigs>
+        <targetConfig targets="lightning__RecordPage">
+            <property name="projectNumberFieldName" type="String"
+                       label="Project Number field API name"
+                       default="Project_Number__c"
+                       description="API name of the field on this record that holds the project number, sent to the REST API." />
+            <property name="taskOrderNumberFieldName" type="String"
+                       label="Task Order Number field API name"
+                       default="Task_Order_Number__c"
+                       description="API name of the field on this record that holds the task order number, sent to the REST API." />
+        </targetConfig>
+    </targetConfigs>
 </LightningComponentBundle>

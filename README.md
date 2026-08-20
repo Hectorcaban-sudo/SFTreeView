@@ -19,6 +19,31 @@ force-app/main/default/lwc/sharePointTreeList/
   sharePointTreeList.js-meta.xml          Component exposure config
 ```
 
+## Passing Project Number / Task Order Number from the current record
+
+The component reads two values off the **current Salesforce record** and
+sends them to the REST API on every fetch and every upload:
+
+- It must be placed on a **Record Page** (any object) — `recordId` and
+  `objectApiName` are then auto-injected by the platform.
+- In the **Lightning App Builder**, when you drag the component onto a
+  record page, its property panel has two fields: **"Project Number
+  field API name"** and **"Task Order Number field API name"** — set
+  these to the actual API names of the fields on that object (defaults
+  are `Project_Number__c` / `Task_Order_Number__c`, almost certainly not
+  your real field names — change them).
+- The LWC uses `lightning/uiRecordApi`'s `getRecord` to read those two
+  fields off the record, then calls Apex only once it has them.
+- In Apex, `getLiveFileRecords()` currently sends them as query string
+  params (`?projectNumber=...&taskOrderNumber=...`) on the GET request,
+  and `uploadFile()` includes them in the upload JSON body. If your REST
+  API expects them somewhere else (headers, a different body shape,
+  different param names), that's the one place to change it.
+- If the field API names are misconfigured (field doesn't exist / no
+  access), the component shows an inline error instead of guessing.
+- If the component is placed somewhere with no record context (a Home or
+  App page), it simply loads without project/task order values.
+
 ## How the tree is actually built (important)
 
 The SharePoint library itself has **no real folders** — every record the
