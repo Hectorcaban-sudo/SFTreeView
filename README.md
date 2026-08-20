@@ -19,6 +19,19 @@ force-app/main/default/lwc/sharePointTreeList/
   sharePointTreeList.js-meta.xml          Component exposure config
 ```
 
+## Sample data mode (works out of the box)
+
+`SharePointTreeListController.cls` has a `USE_SAMPLE_DATA = true` flag at
+the top. While `true`, `getTreeListData()` returns a hardcoded sample
+folder/file hierarchy (Contracts, Marketing, HR, etc.) instead of calling
+your REST API, and `uploadFile()` just simulates a successful upload
+without persisting anything. This means you can deploy the component and
+see it fully working — tree, paging, filters, upload UX — before your
+integration is wired up.
+
+**Flip `USE_SAMPLE_DATA` to `false`** once your Named Credential and REST
+API are ready, so the class starts making real callouts.
+
 ## Setup
 
 1. **Named Credential** — Create one called `SharePoint_API` (Setup >

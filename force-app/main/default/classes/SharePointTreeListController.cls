@@ -42,6 +42,14 @@ public with sharing class SharePointTreeListController {
     private static final String GET_ENDPOINT    = 'callout:SharePoint_API/api/library/items';
     private static final String UPLOAD_ENDPOINT = 'callout:SharePoint_API/api/library/upload';
 
+    // ---- Sample data mode ----
+    // Flip this to false once your Named Credential + REST API are wired up.
+    // While true, getTreeListData() returns the hardcoded sample below instead
+    // of making a live callout, so you can deploy and demo the component
+    // immediately. uploadFile() still just simulates success in this mode
+    // (it does NOT persist anything) so you can test the upload UX end to end.
+    private static final Boolean USE_SAMPLE_DATA = true;
+
     public class TreeItem {
         @AuraEnabled public String id;
         @AuraEnabled public String parentId;
@@ -68,6 +76,10 @@ public with sharing class SharePointTreeListController {
      */
     @AuraEnabled
     public static TreeListResult getTreeListData() {
+        if (USE_SAMPLE_DATA) {
+            return getSampleTreeListData();
+        }
+
         TreeListResult result = new TreeListResult();
         result.items = new List<TreeItem>();
 
@@ -148,6 +160,12 @@ public with sharing class SharePointTreeListController {
             throw new SharePointException('File name and content are required.');
         }
 
+        if (USE_SAMPLE_DATA) {
+            // Demo mode: pretend the upload succeeded. Nothing is persisted.
+            // Flip USE_SAMPLE_DATA to false to actually call the REST API below.
+            return 'OK';
+        }
+
         Map<String, Object> body = new Map<String, Object>{
             'fileName'   => fileName,
             'folderId'   => targetFolderId, // null/blank => upload to library root
@@ -176,5 +194,64 @@ public with sharing class SharePointTreeListController {
         }
 
         return 'OK';
+    }
+
+    /**
+     * Hardcoded sample hierarchy that mimics what the external REST API
+     * would return for a SharePoint document library. Handy for building
+     * and demoing the LWC before the real integration is wired up.
+     */
+    private static TreeListResult getSampleTreeListData() {
+        List<TreeItem> items = new List<TreeItem>();
+
+        items.add(mkFolder('folder-contracts', null, 'Contracts', 'Jane Doe', '2026-07-01T09:15:00Z'));
+        items.add(mkFolder('folder-contracts-2026', 'folder-contracts', '2026', 'Jane Doe', '2026-07-01T09:15:00Z'));
+        items.add(mkFile('file-msa-acme', 'folder-contracts-2026', 'Acme_MSA_2026.pdf', 245000, 'Jane Doe', '2026-07-10T14:22:00Z'));
+        items.add(mkFile('file-nda-globex', 'folder-contracts-2026', 'Globex_NDA.docx', 58000, 'Mike Chen', '2026-06-18T11:05:00Z'));
+        items.add(mkFolder('folder-contracts-2025', 'folder-contracts', '2025', 'Jane Doe', '2025-12-20T08:00:00Z'));
+        items.add(mkFile('file-msa-initech', 'folder-contracts-2025', 'Initech_MSA_2025.pdf', 198000, 'Priya Patel', '2025-11-02T16:40:00Z'));
+
+        items.add(mkFolder('folder-marketing', null, 'Marketing', 'Sam Rivera', '2026-05-14T10:00:00Z'));
+        items.add(mkFile('file-brand-guide', 'folder-marketing', 'Brand_Guidelines_v3.pdf', 3200000, 'Sam Rivera', '2026-05-14T10:02:00Z'));
+        items.add(mkFolder('folder-marketing-assets', 'folder-marketing', 'Assets', 'Sam Rivera', '2026-05-14T10:03:00Z'));
+        items.add(mkFile('file-logo-primary', 'folder-marketing-assets', 'logo-primary.png', 84000, 'Sam Rivera', '2026-05-14T10:04:00Z'));
+        items.add(mkFile('file-logo-dark', 'folder-marketing-assets', 'logo-dark-mode.png', 91000, 'Sam Rivera', '2026-05-15T09:30:00Z'));
+
+        items.add(mkFolder('folder-hr', null, 'HR', 'Angela Wu', '2026-01-10T08:30:00Z'));
+        items.add(mkFile('file-handbook', 'folder-hr', 'Employee_Handbook_2026.pdf', 512000, 'Angela Wu', '2026-01-10T08:31:00Z'));
+        items.add(mkFile('file-benefits', 'folder-hr', 'Benefits_Overview.pptx', 1450000, 'Angela Wu', '2026-02-01T13:10:00Z'));
+
+        items.add(mkFile('file-readme-root', null, 'README.txt', 2100, 'System', '2026-01-01T00:00:00Z'));
+
+        TreeListResult result = new TreeListResult();
+        result.items = items;
+        result.totalCount = items.size();
+        return result;
+    }
+
+    private static TreeItem mkFolder(String id, String parentId, String name, String modifiedBy, String modifiedDate) {
+        TreeItem t = new TreeItem();
+        t.id = id;
+        t.parentId = parentId;
+        t.name = name;
+        t.isFolder = true;
+        t.size = null;
+        t.modifiedBy = modifiedBy;
+        t.modifiedDate = modifiedDate;
+        t.fileUrl = null;
+        return t;
+    }
+
+    private static TreeItem mkFile(String id, String parentId, String name, Integer sizeBytes, String modifiedBy, String modifiedDate) {
+        TreeItem t = new TreeItem();
+        t.id = id;
+        t.parentId = parentId;
+        t.name = name;
+        t.isFolder = false;
+        t.size = sizeBytes;
+        t.modifiedBy = modifiedBy;
+        t.modifiedDate = modifiedDate;
+        t.fileUrl = 'https://contoso.sharepoint.com/sites/demo/Shared%20Documents/' + name;
+        return t;
     }
 }
