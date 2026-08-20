@@ -1,0 +1,224 @@
+<template>
+    <div class="treelist-container slds-box slds-theme_default">
+
+        <!-- Toolbar -->
+        <div class="slds-grid slds-grid_align-spread slds-p-bottom_small toolbar">
+            <div class="slds-col">
+                <h2 class="slds-text-heading_medium">SharePoint Library</h2>
+            </div>
+            <div class="slds-col slds-grid slds-grid_vertical-align-center upload-controls">
+                <lightning-combobox
+                    label="Upload to"
+                    variant="label-hidden"
+                    class="folder-picker slds-m-right_small"
+                    value={selectedFolderId}
+                    options={folderOptions}
+                    onchange={handleFolderSelect}
+                ></lightning-combobox>
+
+                <input
+                    type="file"
+                    class="file-input slds-hide"
+                    onchange={handleFileSelected}
+                />
+                <lightning-button
+                    variant="brand"
+                    label="Upload File"
+                    icon-name="utility:upload"
+                    onclick={handleUploadButtonClick}
+                    disabled={isUploading}
+                    class="slds-m-right_small"
+                ></lightning-button>
+
+                <lightning-button-icon
+                    icon-name="utility:refresh"
+                    alternative-text="Refresh"
+                    title="Refresh"
+                    onclick={handleRefresh}
+                ></lightning-button-icon>
+            </div>
+        </div>
+
+        <template if:true={isUploading}>
+            <div class="slds-p-bottom_x-small">
+                <lightning-progress-bar value="100" size="small"></lightning-progress-bar>
+                <p class="slds-text-body_small slds-text-color_weak">Uploading file…</p>
+            </div>
+        </template>
+
+        <template if:true={errorMessage}>
+            <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                <span class="slds-assistive-text">Error</span>
+                <h2>{errorMessage}</h2>
+            </div>
+        </template>
+
+        <!-- Table -->
+        <div class="table-scroll-wrapper">
+            <table class="slds-table slds-table_bordered slds-table_fixed-layout treelist-table">
+                <thead>
+                    <tr class="slds-line-height_reset">
+                        <th scope="col" style="width: 34%">
+                            <div class="slds-truncate">Name</div>
+                        </th>
+                        <th scope="col" style="width: 12%">
+                            <div class="slds-truncate">Type</div>
+                        </th>
+                        <th scope="col" style="width: 12%">
+                            <div class="slds-truncate">Size</div>
+                        </th>
+                        <th scope="col" style="width: 21%">
+                            <div class="slds-truncate">Modified By</div>
+                        </th>
+                        <th scope="col" style="width: 21%">
+                            <div class="slds-truncate">Modified Date</div>
+                        </th>
+                    </tr>
+                    <tr class="filter-row">
+                        <th>
+                            <lightning-input
+                                type="text"
+                                variant="label-hidden"
+                                placeholder="Filter name…"
+                                value={filters.name}
+                                data-field="name"
+                                onchange={handleFilterChange}
+                            ></lightning-input>
+                        </th>
+                        <th>
+                            <lightning-input
+                                type="text"
+                                variant="label-hidden"
+                                placeholder="Folder/File"
+                                value={filters.type}
+                                data-field="type"
+                                onchange={handleFilterChange}
+                            ></lightning-input>
+                        </th>
+                        <th>
+                            <lightning-input
+                                type="text"
+                                variant="label-hidden"
+                                placeholder="Filter size…"
+                                value={filters.size}
+                                data-field="size"
+                                onchange={handleFilterChange}
+                            ></lightning-input>
+                        </th>
+                        <th>
+                            <lightning-input
+                                type="text"
+                                variant="label-hidden"
+                                placeholder="Filter author…"
+                                value={filters.modifiedBy}
+                                data-field="modifiedBy"
+                                onchange={handleFilterChange}
+                            ></lightning-input>
+                        </th>
+                        <th>
+                            <div class="slds-grid slds-grid_vertical-align-center">
+                                <lightning-input
+                                    type="text"
+                                    variant="label-hidden"
+                                    placeholder="Filter date…"
+                                    value={filters.modifiedDate}
+                                    data-field="modifiedDate"
+                                    onchange={handleFilterChange}
+                                    class="slds-m-right_x-small"
+                                ></lightning-input>
+                                <lightning-button-icon
+                                    icon-name="utility:clear"
+                                    alternative-text="Clear filters"
+                                    title="Clear all filters"
+                                    size="x-small"
+                                    onclick={handleClearFilters}
+                                ></lightning-button-icon>
+                            </div>
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template for:each={visibleRows} for:item="row">
+                        <tr key={row.id} class={row.rowClass}>
+                            <td>
+                                <div class="slds-truncate row-name-cell" style={row.indentStyle}>
+                                    <template if:true={row.hasChildren}>
+                                        <lightning-button-icon
+                                            icon-name={row.toggleIcon}
+                                            alternative-text="Toggle"
+                                            size="xx-small"
+                                            variant="bare"
+                                            data-id={row.id}
+                                            onclick={handleToggleRow}
+                                            class="toggle-icon"
+                                        ></lightning-button-icon>
+                                    </template>
+                                    <template if:false={row.hasChildren}>
+                                        <span class="toggle-spacer"></span>
+                                    </template>
+                                    <lightning-icon
+                                        icon-name={row.isFolder ? 'utility:open_folder' : 'utility:file'}
+                                        size="x-small"
+                                        class="slds-m-right_x-small row-type-icon"
+                                    ></lightning-icon>
+                                    <template if:true={row.isFolder}>
+                                        <span title={row.name}>{row.name}</span>
+                                    </template>
+                                    <template if:false={row.isFolder}>
+                                        <a href={row.fileUrl} target="_blank" title={row.name}>{row.name}</a>
+                                    </template>
+                                </div>
+                            </td>
+                            <td><div class="slds-truncate">{row.typeLabel}</div></td>
+                            <td><div class="slds-truncate">{row.size}</div></td>
+                            <td><div class="slds-truncate">{row.modifiedBy}</div></td>
+                            <td><div class="slds-truncate">{row.modifiedDate}</div></td>
+                        </tr>
+                    </template>
+
+                    <template if:true={isLoading}>
+                        <!-- spinner overlay handles the loading visual; keep body empty while loading -->
+                    </template>
+                </tbody>
+            </table>
+
+            <template if:true={isLoading}>
+                <div class="spinner-overlay">
+                    <lightning-spinner alternative-text="Loading data…" size="medium"></lightning-spinner>
+                </div>
+            </template>
+        </div>
+
+        <!-- Pagination -->
+        <div class="slds-grid slds-grid_align-spread slds-p-top_small pagination-bar">
+            <div class="slds-col slds-text-body_small slds-text-color_weak">
+                {pageInfoLabel}
+            </div>
+            <div class="slds-col slds-grid slds-grid_vertical-align-center">
+                <lightning-combobox
+                    label="Page size"
+                    variant="label-hidden"
+                    class="slds-m-right_small page-size-picker"
+                    value={pageSize}
+                    options={pageSizeOptions}
+                    onchange={handlePageSizeChange}
+                ></lightning-combobox>
+                <lightning-button-icon
+                    icon-name="utility:chevronleft"
+                    alternative-text="Previous page"
+                    title="Previous page"
+                    disabled={isFirstPage}
+                    onclick={handlePrevPage}
+                    class="slds-m-right_x-small"
+                ></lightning-button-icon>
+                <lightning-button-icon
+                    icon-name="utility:chevronright"
+                    alternative-text="Next page"
+                    title="Next page"
+                    disabled={isLastPage}
+                    onclick={handleNextPage}
+                ></lightning-button-icon>
+            </div>
+        </div>
+    </div>
+</template>

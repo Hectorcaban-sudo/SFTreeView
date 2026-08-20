@@ -1,0 +1,67 @@
+.treelist-container {
+    position: relative;
+}
+
+.table-scroll-wrapper {
+    position: relative;
+    max-height: 60vh;
+    overflow: auto;
+    border: 1px solid #dddbda;
+}
+
+.treelist-table thead th {
+    position: sticky;
+    top: 0;
+    background: #f3f3f3;
+    z-index: 2;
+}
+
+.treelist-table thead tr.filter-row th {
+    top: 2.25rem;
+    background: #fafafa;
+    padding: 0.25rem 0.5rem;
+}
+
+.row-name-cell {
+    display: flex;
+    align-items: center;
+}
+
+.toggle-icon {
+    margin-right: 2px;
+}
+
+.toggle-spacer {
+    display: inline-block;
+    width: 26px;
+}
+
+.row-type-icon {
+    margin-right: 4px;
+}
+
+.row-folder td:first-child {
+    font-weight: 600;
+}
+
+.spinner-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+}
+
+.upload-controls {
+    flex-wrap: nowrap;
+}
+
+.folder-picker {
+    min-width: 180px;
+}
+
+.page-size-picker {
+    min-width: 90px;
+}
