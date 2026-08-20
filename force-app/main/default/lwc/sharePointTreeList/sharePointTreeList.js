@@ -85,6 +85,28 @@ export default class SharePointTreeList extends LightningElement {
                 return (a.name || '').localeCompare(b.name || '');
             });
         }
+        this.computeFolderFileCounts();
+    }
+
+    // Counts files under every folder directly from childrenByParent, so
+    // the number shown is always consistent with the tree actually being
+    // rendered - independent of the fileCount value Apex sends.
+    computeFolderFileCounts() {
+        this.folderFileCounts = new Map();
+        const countFiles = (folderId) => {
+            const kids = this.childrenByParent.get(folderId) || [];
+            let total = 0;
+            for (const kid of kids) {
+                total += kid.isFolder ? countFiles(kid.id) : 1;
+            }
+            this.folderFileCounts.set(folderId, total);
+            return total;
+        };
+        for (const item of this.allItems) {
+            if (item.isFolder && !this.folderFileCounts.has(item.id)) {
+                countFiles(item.id);
+            }
+        }
     }
 
     buildFolderOptions() {
@@ -180,15 +202,12 @@ export default class SharePointTreeList extends LightningElement {
         const expanded = filterMode ? true : this.expandedIds.has(item.id);
         const childList = this.childrenByParent.get(item.id) || [];
         const hasKids = childList.length > 0;
-
-        const displayName =
-            item.isFolder && item.fileCount !== undefined && item.fileCount !== null
-                ? `${item.name} (${item.fileCount})`
-                : item.name;
+        const fileCount = item.isFolder ? this.folderFileCounts.get(item.id) || 0 : null;
 
         out.push({
             id: item.id,
-            name: displayName,
+            name: item.name,
+            countLabel: item.isFolder ? `(${fileCount})` : '',
             isFolder: item.isFolder,
             typeLabel: item.isFolder ? 'Folder' : 'File',
             size: item.isFolder ? '' : this.formatSize(item.size),

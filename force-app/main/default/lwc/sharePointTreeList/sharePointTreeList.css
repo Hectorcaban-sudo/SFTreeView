@@ -25,6 +25,21 @@
 .row-name-cell {
     display: flex;
     align-items: center;
+    min-width: 0;
+}
+
+.row-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.row-count-badge {
+    flex-shrink: 0;
+    margin-left: 6px;
+    color: var(--text-secondary, #706e6b);
+    font-variant-numeric: tabular-nums;
 }
 
 .toggle-icon {

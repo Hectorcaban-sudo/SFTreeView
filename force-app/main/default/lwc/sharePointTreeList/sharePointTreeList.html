@@ -162,10 +162,11 @@
                                         class="slds-m-right_x-small row-type-icon"
                                     ></lightning-icon>
                                     <template if:true={row.isFolder}>
-                                        <span title={row.name}>{row.name}</span>
+                                        <span class="row-name-text" title={row.name}>{row.name}</span>
+                                        <span class="row-count-badge">{row.countLabel}</span>
                                     </template>
                                     <template if:false={row.isFolder}>
-                                        <a href={row.fileUrl} target="_blank" title={row.name}>{row.name}</a>
+                                        <a class="row-name-text" href={row.fileUrl} target="_blank" title={row.name}>{row.name}</a>
                                     </template>
                                 </div>
                             </td>
