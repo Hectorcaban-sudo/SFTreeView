@@ -17,6 +17,10 @@
     - Writes ALL duplicates found (removed or kept) to a CSV, recording the Item ID and
       the duplicate field's value, plus status info.
     - $DryRun controls whether items are actually deleted or just reported.
+    - $UseBatch (optional) queues deletions with PnP's New-PnPBatch/Invoke-PnPBatch
+      instead of deleting one item at a time, which is much faster for large numbers
+      of deletions and reduces the chance of SharePoint throttling. CSV logging still
+      happens per item either way.
 
 .NOTES
     Requires the PnP.PowerShell module:
@@ -43,6 +47,10 @@
 
     Search a different field than the duplicate-check field:
         .\Remove-SharePointDuplicates.ps1 -SearchText "12345" -SearchField "EmployeeID"
+
+    Live run using batched deletions (faster, fewer requests, less throttling risk -
+    recommended for large numbers of duplicates):
+        .\Remove-SharePointDuplicates.ps1 -DryRun:$false -UseBatch:$true
 #>
 
 [CmdletBinding()]
@@ -84,7 +92,18 @@ param(
     # ----------------- SAFETY SWITCH -----------------
     # $true  = report only, no deletions (default - safe)
     # $false = actually delete unreferenced duplicates
-    [bool]$DryRun = $true
+    [bool]$DryRun = $true,
+
+    # ----------------- OPTIONAL: batch deletions -----------------
+    # $false (default) = each deletion is sent to SharePoint immediately, one at a time.
+    # $true             = deletions are queued with New-PnPBatch and sent together via
+    #                     Invoke-PnPBatch after the loop, which is much faster for large
+    #                     numbers of deletions and reduces the chance of throttling.
+    #                     CSV logging and per-item status still happen for every row -
+    #                     batched rows are marked accordingly and updated if the batch
+    #                     as a whole fails.
+    # Has no effect in dry run mode, since nothing is deleted either way.
+    [bool]$UseBatch = $false
 )
 
 # --------------------------------------------------------------------------------
@@ -230,6 +249,16 @@ $removedCount = 0
 $keptCount = 0
 $processedCount = 0
 
+# When batching, deletions are queued here and sent together after the loop.
+# We keep a reference to each row's CSV object so we can update its Status
+# once we know whether the batch as a whole succeeded or failed.
+$batch = $null
+$batchQueuedRows = [System.Collections.Generic.List[object]]::new()
+if ($UseBatch -and -not $DryRun) {
+    $batch = New-PnPBatch
+    Write-Host "Batch mode enabled: deletions will be queued and sent together." -ForegroundColor Cyan
+}
+
 foreach ($group in $grouped) {
 
     # Determine which items in this group are referenced by a lookup elsewhere
@@ -276,6 +305,16 @@ foreach ($group in $grouped) {
             $status = "WOULD REMOVE - Not referenced (dry run)"
             $removedCount++
         }
+        elseif ($UseBatch) {
+            try {
+                Remove-PnPListItem -List $TargetListName -Identity $itemId -Batch $batch -Force
+                $status = "QUEUED - Not referenced (pending batch execution)"
+                $removedCount++
+            }
+            catch {
+                $status = "ERROR - Failed to queue for batch: $($_.Exception.Message)"
+            }
+        }
         else {
             try {
                 Remove-PnPListItem -List $TargetListName -Identity $itemId -Force
@@ -287,13 +326,20 @@ foreach ($group in $grouped) {
             }
         }
 
-        $csvRows.Add([PSCustomObject]@{
+        $csvRow = [PSCustomObject]@{
             ItemId              = $itemId
             DuplicateFieldName  = $DuplicateCheckField
             DuplicateFieldValue = $fieldValue
             Status              = $status
             DryRun              = $DryRun
-        })
+        }
+        $csvRows.Add($csvRow)
+
+        # Keep a reference to rows that are pending batch execution so we can
+        # update their Status once Invoke-PnPBatch runs, below.
+        if ($UseBatch -and -not $DryRun -and $status -like "QUEUED*") {
+            $batchQueuedRows.Add($csvRow)
+        }
 
         Write-Host "  [$processedCount/$totalDuplicateItems] ID $itemId | $DuplicateCheckField = '$fieldValue' | $status"
     }
@@ -301,6 +347,31 @@ foreach ($group in $grouped) {
 
 # Clear the progress bar now that processing is complete
 Write-Progress -Activity "Processing SharePoint duplicates" -Completed
+
+# --------------------------------------------------------------------------------
+# Step 4b: Execute the batch (only runs when -UseBatch was set and this isn't a dry run)
+# --------------------------------------------------------------------------------
+
+if ($UseBatch -and -not $DryRun -and $batchQueuedRows.Count -gt 0) {
+    Write-Host "`nSending batch of $($batchQueuedRows.Count) queued deletion(s) to SharePoint ..." -ForegroundColor Cyan
+    try {
+        Invoke-PnPBatch -Batch $batch
+        foreach ($row in $batchQueuedRows) {
+            $row.Status = "REMOVED - Not referenced (batched)"
+        }
+        Write-Host "Batch completed successfully." -ForegroundColor Green
+    }
+    catch {
+        # If the batch call itself fails, we can't be sure which individual items
+        # succeeded vs. failed, so mark all queued rows as errored for visibility
+        # and prompt the user to re-run (ideally without -UseBatch) to confirm state.
+        foreach ($row in $batchQueuedRows) {
+            $row.Status = "ERROR - Batch deletion failed: $($_.Exception.Message)"
+        }
+        Write-Host "Batch FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Re-run the script (consider -UseBatch:`$false) to confirm which items were actually removed." -ForegroundColor Yellow
+    }
+}
 
 # --------------------------------------------------------------------------------
 # Step 5: Export CSV
