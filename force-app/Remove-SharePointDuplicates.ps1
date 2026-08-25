@@ -107,6 +107,41 @@ if ($DryRun) {
 }
 
 # --------------------------------------------------------------------------------
+# Step 0: Validate that the lookup field actually points to the target list
+# --------------------------------------------------------------------------------
+# It's easy to mis-configure $LookupListName / $LookupFieldInternalName to point at
+# the wrong list. If that happens, "referenced" IDs would be meaningless - either
+# wrongly protecting duplicates that aren't really referenced, or wrongly clearing
+# duplicates that are. So we check the field's schema before trusting it.
+
+Write-Host "Validating that '$LookupFieldInternalName' on '$LookupListName' points to '$TargetListName' ..." -ForegroundColor Cyan
+
+$targetList = Get-PnPList -Identity $TargetListName -Includes Id -ErrorAction Stop
+$lookupField = Get-PnPField -List $LookupListName -Identity $LookupFieldInternalName -ErrorAction Stop
+
+if ($lookupField.TypeAsString -notlike "Lookup*") {
+    Write-Error "Field '$LookupFieldInternalName' on '$LookupListName' is not a Lookup field (type: $($lookupField.TypeAsString)). Aborting."
+    Disconnect-PnPOnline
+    exit 1
+}
+
+# The field's SchemaXml contains a List="{GUID}" attribute identifying the source list
+$schemaXml = [xml]$lookupField.SchemaXml
+$sourceListId = $schemaXml.Field.List
+
+$targetListIdString = $targetList.Id.ToString("B").ToUpper()   # e.g. "{GUID}"
+$sourceListIdString = $sourceListId.ToUpper()
+if (-not $sourceListIdString.StartsWith("{")) { $sourceListIdString = "{$sourceListIdString}" }
+
+if ($sourceListIdString -ne $targetListIdString) {
+    Write-Error "Lookup field '$LookupFieldInternalName' on '$LookupListName' points to list ID $sourceListIdString, which does NOT match '$TargetListName' ($targetListIdString). Check `$LookupListName / `$LookupFieldInternalName. Aborting."
+    Disconnect-PnPOnline
+    exit 1
+}
+
+Write-Host "Confirmed: '$LookupFieldInternalName' points to '$TargetListName'." -ForegroundColor Green
+
+# --------------------------------------------------------------------------------
 # Step 1: Pull all items from the target list
 # --------------------------------------------------------------------------------
 
