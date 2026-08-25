@@ -20,7 +20,13 @@
     - $UseBatch (optional) queues deletions with PnP's New-PnPBatch/Invoke-PnPBatch
       instead of deleting one item at a time, which is much faster for large numbers
       of deletions and reduces the chance of SharePoint throttling. CSV logging still
-      happens per item either way.
+      happens per item either way. Since Invoke-PnPBatch has no built-in progress
+      events, the script manually chunks deletions into groups of $BatchSize (default
+      100, SharePoint's own cap) and sends/reports each chunk as it fills up, so you
+      see progress batch-by-batch rather than one opaque call at the very end.
+    - $SendToRecycleBin (optional, default $true) sends removed items to the site's
+      Recycle Bin instead of permanently deleting them, giving you a recovery window
+      if something unexpected gets removed.
 
 .NOTES
     Requires the PnP.PowerShell module:
@@ -51,6 +57,9 @@
     Live run using batched deletions (faster, fewer requests, less throttling risk -
     recommended for large numbers of duplicates):
         .\Remove-SharePointDuplicates.ps1 -DryRun:$false -UseBatch:$true
+
+    Permanently delete instead of sending to the Recycle Bin (use with caution):
+        .\Remove-SharePointDuplicates.ps1 -DryRun:$false -SendToRecycleBin:$false
 #>
 
 [CmdletBinding()]
@@ -96,14 +105,31 @@ param(
 
     # ----------------- OPTIONAL: batch deletions -----------------
     # $false (default) = each deletion is sent to SharePoint immediately, one at a time.
-    # $true             = deletions are queued with New-PnPBatch and sent together via
-    #                     Invoke-PnPBatch after the loop, which is much faster for large
+    # $true             = deletions are queued and sent in chunks of $BatchSize via
+    #                     New-PnPBatch/Invoke-PnPBatch, which is much faster for large
     #                     numbers of deletions and reduces the chance of throttling.
+    #                     Each chunk is sent and reported on as soon as it fills up,
+    #                     rather than waiting until the very end.
     #                     CSV logging and per-item status still happen for every row -
-    #                     batched rows are marked accordingly and updated if the batch
-    #                     as a whole fails.
+    #                     batched rows are marked accordingly and updated once their
+    #                     chunk is sent (or if that chunk's send fails).
     # Has no effect in dry run mode, since nothing is deleted either way.
-    [bool]$UseBatch = $false
+    [bool]$UseBatch = $false,
+
+    # How many deletions to send per batch chunk when -UseBatch is enabled. SharePoint's
+    # REST API caps batches at 100 requests, and Invoke-PnPBatch would silently split
+    # anything larger into groups of 100 anyway. Chunking manually at this size lets the
+    # script report progress after each chunk completes ("Batch 3 of 6 sent..."), since
+    # Invoke-PnPBatch itself has no progress events/hooks to surface that internally.
+    # Max effective value is 100 - anything higher is capped by SharePoint regardless.
+    [int]$BatchSize = 100,
+
+    # ----------------- OPTIONAL: recycle bin instead of permanent delete -----------------
+    # $true  = removed items go to the site's Recycle Bin, recoverable for the normal
+    #          retention window (default - safer, recommended).
+    # $false = items are permanently deleted, bypassing the Recycle Bin entirely.
+    # Has no effect in dry run mode, since nothing is deleted either way.
+    [bool]$SendToRecycleBin = $true
 )
 
 # --------------------------------------------------------------------------------
@@ -249,14 +275,51 @@ $removedCount = 0
 $keptCount = 0
 $processedCount = 0
 
-# When batching, deletions are queued here and sent together after the loop.
-# We keep a reference to each row's CSV object so we can update its Status
-# once we know whether the batch as a whole succeeded or failed.
-$batch = $null
-$batchQueuedRows = [System.Collections.Generic.List[object]]::new()
+# When batching, deletions are queued into chunks of $BatchSize (SharePoint's own
+# limit is 100 requests/batch, and Invoke-PnPBatch would split silently at that size
+# anyway - here we chunk manually ourselves so we can report progress after each
+# chunk is actually sent, since Invoke-PnPBatch itself has no progress events/hooks).
+$currentBatch      = $null
+$currentBatchRows  = [System.Collections.Generic.List[object]]::new()
+$currentBatchCount = 0
+$batchNumber       = 0
+$totalBatchedRemoved = 0
+
+# Sends whatever is currently queued in $currentBatch, updates the CSV status for
+# each row in that chunk based on success/failure, and resets for the next chunk.
+function Invoke-BatchChunk {
+    param(
+        [Parameter(Mandatory)] $BatchObject,
+        [Parameter(Mandatory)] [System.Collections.Generic.List[object]]$Rows,
+        [Parameter(Mandatory)] [int]$ChunkNumber,
+        [Parameter(Mandatory)] [bool]$RecycleBin
+    )
+
+    if ($Rows.Count -eq 0) { return }
+
+    Write-Host "`nSending batch #$ChunkNumber ($($Rows.Count) item(s)) to SharePoint ..." -ForegroundColor Cyan
+    try {
+        Invoke-PnPBatch -Batch $BatchObject
+        $recycleNote = if ($RecycleBin) { " (to Recycle Bin)" } else { "" }
+        foreach ($row in $Rows) {
+            $row.Status = "REMOVED - Not referenced (batch #$ChunkNumber)$recycleNote"
+        }
+        Write-Host "Batch #$ChunkNumber completed successfully. ($($Rows.Count) item(s) removed)" -ForegroundColor Green
+    }
+    catch {
+        # If the batch call itself fails, we can't be sure which individual items in
+        # THIS chunk succeeded vs. failed, so mark all rows in this chunk as errored.
+        # Earlier chunks that already completed successfully are unaffected.
+        foreach ($row in $Rows) {
+            $row.Status = "ERROR - Batch #$ChunkNumber failed: $($_.Exception.Message)"
+        }
+        Write-Host "Batch #$ChunkNumber FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 if ($UseBatch -and -not $DryRun) {
-    $batch = New-PnPBatch
-    Write-Host "Batch mode enabled: deletions will be queued and sent together." -ForegroundColor Cyan
+    $currentBatch = New-PnPBatch
+    Write-Host "Batch mode enabled: deletions will be sent in chunks of $BatchSize." -ForegroundColor Cyan
 }
 
 foreach ($group in $grouped) {
@@ -307,8 +370,16 @@ foreach ($group in $grouped) {
         }
         elseif ($UseBatch) {
             try {
-                Remove-PnPListItem -List $TargetListName -Identity $itemId -Batch $batch -Force
-                $status = "QUEUED - Not referenced (pending batch execution)"
+                # NOTE: -Force is intentionally omitted here. Remove-PnPListItem's -Batch
+                # parameter set does not accept -Force ("Parameter set cannot be resolved"
+                # error) - batched deletions don't prompt for confirmation anyway, so it's
+                # not needed. -Recycle IS supported alongside -Batch.
+                if ($SendToRecycleBin) {
+                    Remove-PnPListItem -List $TargetListName -Identity $itemId -Batch $currentBatch -Recycle
+                } else {
+                    Remove-PnPListItem -List $TargetListName -Identity $itemId -Batch $currentBatch
+                }
+                $status = "QUEUED - Not referenced (pending batch #$($batchNumber + 1))"
                 $removedCount++
             }
             catch {
@@ -317,8 +388,13 @@ foreach ($group in $grouped) {
         }
         else {
             try {
-                Remove-PnPListItem -List $TargetListName -Identity $itemId -Force
-                $status = "REMOVED - Not referenced"
+                if ($SendToRecycleBin) {
+                    Remove-PnPListItem -List $TargetListName -Identity $itemId -Force -Recycle
+                } else {
+                    Remove-PnPListItem -List $TargetListName -Identity $itemId -Force
+                }
+                $recycleNote = if ($SendToRecycleBin) { " (to Recycle Bin)" } else { "" }
+                $status = "REMOVED - Not referenced$recycleNote"
                 $removedCount++
             }
             catch {
@@ -335,10 +411,23 @@ foreach ($group in $grouped) {
         }
         $csvRows.Add($csvRow)
 
-        # Keep a reference to rows that are pending batch execution so we can
-        # update their Status once Invoke-PnPBatch runs, below.
+        # Track rows pending in the current chunk. Once the chunk hits $BatchSize,
+        # flush it immediately so progress is visible batch-by-batch rather than
+        # all at once at the very end.
         if ($UseBatch -and -not $DryRun -and $status -like "QUEUED*") {
-            $batchQueuedRows.Add($csvRow)
+            $currentBatchRows.Add($csvRow)
+            $currentBatchCount++
+
+            if ($currentBatchCount -ge $BatchSize) {
+                $batchNumber++
+                Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -RecycleBin $SendToRecycleBin
+                $totalBatchedRemoved += $currentBatchRows.Count
+
+                # Reset for the next chunk
+                $currentBatch      = New-PnPBatch
+                $currentBatchRows  = [System.Collections.Generic.List[object]]::new()
+                $currentBatchCount = 0
+            }
         }
 
         Write-Host "  [$processedCount/$totalDuplicateItems] ID $itemId | $DuplicateCheckField = '$fieldValue' | $status"
@@ -349,28 +438,17 @@ foreach ($group in $grouped) {
 Write-Progress -Activity "Processing SharePoint duplicates" -Completed
 
 # --------------------------------------------------------------------------------
-# Step 4b: Execute the batch (only runs when -UseBatch was set and this isn't a dry run)
+# Step 4b: Flush any remaining partial chunk (fewer than $BatchSize items left over)
 # --------------------------------------------------------------------------------
 
-if ($UseBatch -and -not $DryRun -and $batchQueuedRows.Count -gt 0) {
-    Write-Host "`nSending batch of $($batchQueuedRows.Count) queued deletion(s) to SharePoint ..." -ForegroundColor Cyan
-    try {
-        Invoke-PnPBatch -Batch $batch
-        foreach ($row in $batchQueuedRows) {
-            $row.Status = "REMOVED - Not referenced (batched)"
-        }
-        Write-Host "Batch completed successfully." -ForegroundColor Green
-    }
-    catch {
-        # If the batch call itself fails, we can't be sure which individual items
-        # succeeded vs. failed, so mark all queued rows as errored for visibility
-        # and prompt the user to re-run (ideally without -UseBatch) to confirm state.
-        foreach ($row in $batchQueuedRows) {
-            $row.Status = "ERROR - Batch deletion failed: $($_.Exception.Message)"
-        }
-        Write-Host "Batch FAILED: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Re-run the script (consider -UseBatch:`$false) to confirm which items were actually removed." -ForegroundColor Yellow
-    }
+if ($UseBatch -and -not $DryRun -and $currentBatchRows.Count -gt 0) {
+    $batchNumber++
+    Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -RecycleBin $SendToRecycleBin
+    $totalBatchedRemoved += $currentBatchRows.Count
+}
+
+if ($UseBatch -and -not $DryRun -and $batchNumber -gt 0) {
+    Write-Host "`nAll batches complete: $batchNumber batch(es) sent, $totalBatchedRemoved item(s) processed." -ForegroundColor Cyan
 }
 
 # --------------------------------------------------------------------------------
