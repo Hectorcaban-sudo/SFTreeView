@@ -11,6 +11,9 @@
       field on another list. If it IS referenced, the item is SKIPPED (kept, even if it's
       a duplicate) to avoid breaking the lookup relationship.
     - If it is NOT referenced anywhere, it's a removal candidate.
+    - SAFETY NET: within each group of duplicates, at least one record always
+      survives. If none of the duplicates are lookup-referenced, the oldest
+      (lowest ID) copy is kept automatically rather than deleting every copy.
     - Writes ALL duplicates found (removed or kept) to a CSV, recording the Item ID and
       the duplicate field's value, plus status info.
     - $DryRun controls whether items are actually deleted or just reported.
@@ -33,6 +36,13 @@
 
     Live run - actually deletes unreferenced duplicates:
         .\Remove-SharePointDuplicates.ps1 -DryRun:$false
+
+    Narrow down to records matching specific text before checking for duplicates
+    (e.g. testing against one known record, or a subset like a particular customer name):
+        .\Remove-SharePointDuplicates.ps1 -SearchText "Acme Corp"
+
+    Search a different field than the duplicate-check field:
+        .\Remove-SharePointDuplicates.ps1 -SearchText "12345" -SearchField "EmployeeID"
 #>
 
 [CmdletBinding()]
@@ -58,6 +68,17 @@ param(
 
     # Where to write the CSV of duplicates found
     [string]$OutputCsvPath = ".\SharePointDuplicates_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv",
+
+    # ----------------- OPTIONAL: search for a particular record -----------------
+    # If set, the script will only consider items in the target list whose
+    # $SearchField contains this text (case-insensitive, partial match) before
+    # running the duplicate check. Leave blank ("") to process the whole list.
+    # Useful for testing against one record, or narrowing down to a known subset.
+    [string]$SearchText = "",
+
+    # Which field to search against when $SearchText is provided.
+    # Defaults to the same field used for duplicate detection.
+    [string]$SearchField = $DuplicateCheckField,
 
     # ----------------- SAFETY SWITCH -----------------
     # $true  = report only, no deletions (default - safe)
@@ -90,9 +111,38 @@ if ($DryRun) {
 # --------------------------------------------------------------------------------
 
 Write-Host "Retrieving items from '$TargetListName' ..." -ForegroundColor Cyan
-$targetItems = Get-PnPListItem -List $TargetListName -PageSize 500 -Fields "Id", $DuplicateCheckField
+
+# Make sure we always pull both the duplicate-check field and the search field
+$fieldsToRetrieve = @("Id", $DuplicateCheckField)
+if ($SearchField -and ($fieldsToRetrieve -notcontains $SearchField)) {
+    $fieldsToRetrieve += $SearchField
+}
+
+$targetItems = Get-PnPListItem -List $TargetListName -PageSize 500 -Fields $fieldsToRetrieve
 
 Write-Host "Retrieved $($targetItems.Count) items from '$TargetListName'." -ForegroundColor Cyan
+
+# --------------------------------------------------------------------------------
+# Optional: filter down to a particular record / subset by search text
+# --------------------------------------------------------------------------------
+
+if (-not [string]::IsNullOrWhiteSpace($SearchText)) {
+    Write-Host "Filtering to items where '$SearchField' contains '$SearchText' ..." -ForegroundColor Cyan
+
+    $beforeCount = $targetItems.Count
+    $targetItems = $targetItems | Where-Object {
+        $val = $_.FieldValues[$SearchField]
+        $null -ne $val -and $val.ToString() -like "*$SearchText*"
+    }
+
+    Write-Host "Search matched $($targetItems.Count) of $beforeCount item(s)." -ForegroundColor Cyan
+
+    if ($targetItems.Count -eq 0) {
+        Write-Host "No items matched '$SearchText' in field '$SearchField'. Exiting." -ForegroundColor Yellow
+        Disconnect-PnPOnline
+        exit 0
+    }
+}
 
 # --------------------------------------------------------------------------------
 # Step 2: Pull all items from the lookup list and build a set of referenced IDs
@@ -142,14 +192,35 @@ $keptCount = 0
 
 foreach ($group in $grouped) {
 
-    foreach ($item in $group.Group) {
+    # Determine which items in this group are referenced by a lookup elsewhere
+    $itemsInGroup = $group.Group
+    $referencedItems   = @($itemsInGroup | Where-Object { $referencedIds.Contains([int]$_.Id) })
+    $unreferencedItems = @($itemsInGroup | Where-Object { -not $referencedIds.Contains([int]$_.Id) })
+
+    # Safety net: this group must end up with at least one surviving record.
+    # If at least one item is already referenced, that's covered - referenced
+    # items are never removed, so the group is safe.
+    # If NONE are referenced, we must manually spare one from removal so the
+    # group isn't wiped out entirely. We keep the lowest ID (oldest item) as
+    # the "survivor" by convention.
+    $survivorId = $null
+    if ($referencedItems.Count -eq 0 -and $unreferencedItems.Count -gt 0) {
+        $survivorId = ($unreferencedItems | Sort-Object Id | Select-Object -First 1).Id
+    }
+
+    foreach ($item in $itemsInGroup) {
 
         $itemId       = $item.Id
         $fieldValue   = $item.FieldValues[$DuplicateCheckField]
         $isReferenced = $referencedIds.Contains([int]$itemId)
+        $isSurvivor   = ($null -ne $survivorId -and $itemId -eq $survivorId)
 
         if ($isReferenced) {
             $status = "KEPT - Referenced by lookup"
+            $keptCount++
+        }
+        elseif ($isSurvivor) {
+            $status = "KEPT - Last remaining copy (safety net, not referenced)"
             $keptCount++
         }
         elseif ($DryRun) {
