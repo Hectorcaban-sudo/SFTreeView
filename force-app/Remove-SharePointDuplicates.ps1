@@ -37,8 +37,8 @@
     Live run - actually deletes unreferenced duplicates:
         .\Remove-SharePointDuplicates.ps1 -DryRun:$false
 
-    Narrow down to records matching specific text before checking for duplicates
-    (e.g. testing against one known record, or a subset like a particular customer name):
+    Narrow down to a record matching exact text before checking for duplicates
+    (e.g. testing against one known record, or an exact subset like a specific customer name):
         .\Remove-SharePointDuplicates.ps1 -SearchText "Acme Corp"
 
     Search a different field than the duplicate-check field:
@@ -71,9 +71,10 @@ param(
 
     # ----------------- OPTIONAL: search for a particular record -----------------
     # If set, the script will only consider items in the target list whose
-    # $SearchField contains this text (case-insensitive, partial match) before
-    # running the duplicate check. Leave blank ("") to process the whole list.
-    # Useful for testing against one record, or narrowing down to a known subset.
+    # $SearchField exactly matches this text (case-insensitive, whitespace-trimmed,
+    # but NOT a partial/contains match) before running the duplicate check.
+    # Leave blank ("") to process the whole list.
+    # Useful for testing against one known record, or narrowing down to a known subset.
     [string]$SearchText = "",
 
     # Which field to search against when $SearchText is provided.
@@ -162,18 +163,18 @@ Write-Host "Retrieved $($targetItems.Count) items from '$TargetListName'." -Fore
 # --------------------------------------------------------------------------------
 
 if (-not [string]::IsNullOrWhiteSpace($SearchText)) {
-    Write-Host "Filtering to items where '$SearchField' contains '$SearchText' ..." -ForegroundColor Cyan
+    Write-Host "Filtering to items where '$SearchField' exactly equals '$SearchText' ..." -ForegroundColor Cyan
 
     $beforeCount = $targetItems.Count
     $targetItems = $targetItems | Where-Object {
         $val = $_.FieldValues[$SearchField]
-        $null -ne $val -and $val.ToString() -like "*$SearchText*"
+        $null -ne $val -and $val.ToString().Trim().Equals($SearchText.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
     }
 
     Write-Host "Search matched $($targetItems.Count) of $beforeCount item(s)." -ForegroundColor Cyan
 
     if ($targetItems.Count -eq 0) {
-        Write-Host "No items matched '$SearchText' in field '$SearchField'. Exiting." -ForegroundColor Yellow
+        Write-Host "No items exactly matched '$SearchText' in field '$SearchField'. Exiting." -ForegroundColor Yellow
         Disconnect-PnPOnline
         exit 0
     }
@@ -217,6 +218,9 @@ $grouped = $targetItems | Group-Object { $_.FieldValues[$DuplicateCheckField] } 
 
 Write-Host "Found $($grouped.Count) value(s) of '$DuplicateCheckField' with duplicates." -ForegroundColor Cyan
 
+# Total individual duplicate records across all groups (used for the progress counter)
+$totalDuplicateItems = ($grouped | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+
 # --------------------------------------------------------------------------------
 # Step 4: Evaluate each duplicate, decide keep/remove, log results
 # --------------------------------------------------------------------------------
@@ -224,6 +228,7 @@ Write-Host "Found $($grouped.Count) value(s) of '$DuplicateCheckField' with dupl
 $csvRows = [System.Collections.Generic.List[object]]::new()
 $removedCount = 0
 $keptCount = 0
+$processedCount = 0
 
 foreach ($group in $grouped) {
 
@@ -244,6 +249,15 @@ foreach ($group in $grouped) {
     }
 
     foreach ($item in $itemsInGroup) {
+
+        $processedCount++
+
+        # Write-Progress pins a bar/status line at the top of the console window
+        # so the counter stays visible while everything else scrolls beneath it.
+        $percentComplete = if ($totalDuplicateItems -gt 0) { [math]::Round(($processedCount / $totalDuplicateItems) * 100) } else { 0 }
+        Write-Progress -Activity "Processing SharePoint duplicates" `
+            -Status "$processedCount out of $totalDuplicateItems" `
+            -PercentComplete $percentComplete
 
         $itemId       = $item.Id
         $fieldValue   = $item.FieldValues[$DuplicateCheckField]
@@ -281,9 +295,12 @@ foreach ($group in $grouped) {
             DryRun              = $DryRun
         })
 
-        Write-Host "  ID $itemId | $DuplicateCheckField = '$fieldValue' | $status"
+        Write-Host "  [$processedCount/$totalDuplicateItems] ID $itemId | $DuplicateCheckField = '$fieldValue' | $status"
     }
 }
+
+# Clear the progress bar now that processing is complete
+Write-Progress -Activity "Processing SharePoint duplicates" -Completed
 
 # --------------------------------------------------------------------------------
 # Step 5: Export CSV
