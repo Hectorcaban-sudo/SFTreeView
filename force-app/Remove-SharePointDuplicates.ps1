@@ -24,6 +24,9 @@
       events, the script manually chunks deletions into groups of $BatchSize (default
       100, SharePoint's own cap) and sends/reports each chunk as it fills up, so you
       see progress batch-by-batch rather than one opaque call at the very end.
+    - Timing: each batch chunk is timed individually and reported as "Batch X out of Y"
+      with its own elapsed time, plus a total/average across all batches once done. The
+      whole script run is also timed with a stopwatch, reported in the final summary.
     - $SendToRecycleBin (optional, default $true) sends removed items to the site's
       Recycle Bin instead of permanently deleting them, giving you a recovery window
       if something unexpected gets removed.
@@ -135,6 +138,9 @@ param(
 # --------------------------------------------------------------------------------
 # Setup
 # --------------------------------------------------------------------------------
+
+# Overall script stopwatch - reported at the very end of the run.
+$scriptStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not (Get-Module -ListAvailable -Name PnP.PowerShell)) {
     Write-Error "PnP.PowerShell module not found. Install it with: Install-Module PnP.PowerShell -Scope CurrentUser"
@@ -267,6 +273,34 @@ Write-Host "Found $($grouped.Count) value(s) of '$DuplicateCheckField' with dupl
 $totalDuplicateItems = ($grouped | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
 
 # --------------------------------------------------------------------------------
+# Step 3b: Pre-pass to work out how many batches we'll need (for "Batch X out of Y")
+# --------------------------------------------------------------------------------
+# This mirrors the keep/remove decision logic used in the main loop below (referenced
+# items are kept, plus one survivor per group if none are referenced) but only counts,
+# it doesn't delete anything. Only needed when batching a live run.
+
+$totalBatches = 0
+if ($UseBatch -and -not $DryRun) {
+    $plannedRemovalCount = 0
+    foreach ($group in $grouped) {
+        $itemsInGroup = $group.Group
+        $referencedItems   = @($itemsInGroup | Where-Object { $referencedIds.Contains([int]$_.Id) })
+        $unreferencedItems = @($itemsInGroup | Where-Object { -not $referencedIds.Contains([int]$_.Id) })
+
+        if ($referencedItems.Count -eq 0 -and $unreferencedItems.Count -gt 0) {
+            # One survivor is spared, the rest of the unreferenced items would be removed
+            $plannedRemovalCount += ($unreferencedItems.Count - 1)
+        }
+        else {
+            # At least one referenced item exists, so ALL unreferenced items are removable
+            $plannedRemovalCount += $unreferencedItems.Count
+        }
+    }
+    $totalBatches = [math]::Max(1, [math]::Ceiling($plannedRemovalCount / $BatchSize))
+    Write-Host "Planned removals: $plannedRemovalCount item(s) across an estimated $totalBatches batch(es)." -ForegroundColor Cyan
+}
+
+# --------------------------------------------------------------------------------
 # Step 4: Evaluate each duplicate, decide keep/remove, log results
 # --------------------------------------------------------------------------------
 
@@ -284,36 +318,50 @@ $currentBatchRows  = [System.Collections.Generic.List[object]]::new()
 $currentBatchCount = 0
 $batchNumber       = 0
 $totalBatchedRemoved = 0
+$batchTimings      = [System.Collections.Generic.List[double]]::new()
 
 # Sends whatever is currently queued in $currentBatch, updates the CSV status for
 # each row in that chunk based on success/failure, and resets for the next chunk.
+# Times the send with its own stopwatch and reports "Batch X out of Y" plus elapsed time.
 function Invoke-BatchChunk {
     param(
         [Parameter(Mandatory)] $BatchObject,
         [Parameter(Mandatory)] [System.Collections.Generic.List[object]]$Rows,
         [Parameter(Mandatory)] [int]$ChunkNumber,
-        [Parameter(Mandatory)] [bool]$RecycleBin
+        [Parameter(Mandatory)] [int]$TotalChunks,
+        [Parameter(Mandatory)] [bool]$RecycleBin,
+        [Parameter(Mandatory)] [System.Collections.Generic.List[double]]$TimingLog
     )
 
     if ($Rows.Count -eq 0) { return }
 
-    Write-Host "`nSending batch #$ChunkNumber ($($Rows.Count) item(s)) to SharePoint ..." -ForegroundColor Cyan
+    $batchLabel = if ($TotalChunks -gt 0) { "Batch $ChunkNumber out of $TotalChunks" } else { "Batch $ChunkNumber" }
+
+    Write-Host "`n$batchLabel - sending $($Rows.Count) item(s) to SharePoint ..." -ForegroundColor Cyan
+
+    $batchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         Invoke-PnPBatch -Batch $BatchObject
+        $batchStopwatch.Stop()
+        $TimingLog.Add($batchStopwatch.Elapsed.TotalSeconds)
+
         $recycleNote = if ($RecycleBin) { " (to Recycle Bin)" } else { "" }
         foreach ($row in $Rows) {
             $row.Status = "REMOVED - Not referenced (batch #$ChunkNumber)$recycleNote"
         }
-        Write-Host "Batch #$ChunkNumber completed successfully. ($($Rows.Count) item(s) removed)" -ForegroundColor Green
+        Write-Host "$batchLabel completed successfully in $($batchStopwatch.Elapsed.ToString('mm\:ss\.ff')) ($($Rows.Count) item(s) removed)" -ForegroundColor Green
     }
     catch {
+        $batchStopwatch.Stop()
+        $TimingLog.Add($batchStopwatch.Elapsed.TotalSeconds)
+
         # If the batch call itself fails, we can't be sure which individual items in
         # THIS chunk succeeded vs. failed, so mark all rows in this chunk as errored.
         # Earlier chunks that already completed successfully are unaffected.
         foreach ($row in $Rows) {
             $row.Status = "ERROR - Batch #$ChunkNumber failed: $($_.Exception.Message)"
         }
-        Write-Host "Batch #$ChunkNumber FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "$batchLabel FAILED after $($batchStopwatch.Elapsed.ToString('mm\:ss\.ff')): $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -420,7 +468,7 @@ foreach ($group in $grouped) {
 
             if ($currentBatchCount -ge $BatchSize) {
                 $batchNumber++
-                Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -RecycleBin $SendToRecycleBin
+                Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -TotalChunks $totalBatches -RecycleBin $SendToRecycleBin -TimingLog $batchTimings
                 $totalBatchedRemoved += $currentBatchRows.Count
 
                 # Reset for the next chunk
@@ -443,12 +491,19 @@ Write-Progress -Activity "Processing SharePoint duplicates" -Completed
 
 if ($UseBatch -and -not $DryRun -and $currentBatchRows.Count -gt 0) {
     $batchNumber++
-    Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -RecycleBin $SendToRecycleBin
+    Invoke-BatchChunk -BatchObject $currentBatch -Rows $currentBatchRows -ChunkNumber $batchNumber -TotalChunks $totalBatches -RecycleBin $SendToRecycleBin -TimingLog $batchTimings
     $totalBatchedRemoved += $currentBatchRows.Count
 }
 
 if ($UseBatch -and -not $DryRun -and $batchNumber -gt 0) {
+    $totalBatchTime = ($batchTimings | Measure-Object -Sum).Sum
+    $avgBatchTime   = ($batchTimings | Measure-Object -Average).Average
+    $totalBatchTimeSpan = [TimeSpan]::FromSeconds($totalBatchTime)
+    $avgBatchTimeSpan   = [TimeSpan]::FromSeconds($avgBatchTime)
+
     Write-Host "`nAll batches complete: $batchNumber batch(es) sent, $totalBatchedRemoved item(s) processed." -ForegroundColor Cyan
+    Write-Host "  Total time in batch sends : $($totalBatchTimeSpan.ToString('mm\:ss\.ff'))" -ForegroundColor Cyan
+    Write-Host "  Average time per batch    : $($avgBatchTimeSpan.ToString('mm\:ss\.ff'))" -ForegroundColor Cyan
 }
 
 # --------------------------------------------------------------------------------
@@ -467,5 +522,8 @@ Write-Host "  Duplicate records found : $($csvRows.Count)"
 Write-Host "  Kept (referenced)       : $keptCount"
 Write-Host "  Removed / would remove  : $removedCount"
 Write-Host "  Mode                    : $(if ($DryRun) { 'DRY RUN' } else { 'LIVE' })"
+
+$scriptStopwatch.Stop()
+Write-Host "  Total script run time   : $($scriptStopwatch.Elapsed.ToString('hh\:mm\:ss\.ff'))" -ForegroundColor Cyan
 
 Disconnect-PnPOnline
